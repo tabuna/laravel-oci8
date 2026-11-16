@@ -1,0 +1,46 @@
+name: Oracle 11g index metadata diagnosis
+on:
+  push:
+    branches: [codex/diagnose-oracle11-indexes]
+permissions:
+  contents: read
+jobs:
+  dictionary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      oracle:
+        image: deepdiver/docker-oracle-xe-11g:2.0
+        ports: [1521:1521]
+    steps:
+      - name: Wait for Oracle
+        run: |
+          for attempt in {1..90}; do
+            if docker exec -u oracle ${{ job.services.oracle.id }} bash -lc "export ORACLE_HOME=/u01/app/oracle/product/11.2.0/xe; echo 'select 123456 from dual;' | /u01/app/oracle/product/11.2.0/xe/bin/sqlplus -s system/oracle@XE" | grep -q 123456; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+      - name: Inspect constraints and joins
+        run: |
+          docker exec -i -u oracle ${{ job.services.oracle.id }} bash -lc 'export ORACLE_HOME=/u01/app/oracle/product/11.2.0/xe; exec /u01/app/oracle/product/11.2.0/xe/bin/sqlplus -s system/oracle@XE' <<'SQL'
+          whenever sqlerror exit failure
+          set pagesize 100 linesize 240 long 1000
+          create table index_metadata (id number, first_name varchar2(100), last_name varchar2(100), payload blob, constraint primary_metadata primary key(id), constraint metadata_pk_label unique(first_name));
+          create index metadata_names on index_metadata(last_name desc,first_name asc);
+          create index metadata_expression on index_metadata(case when first_name='Admin,User' then lower(first_name) end);
+          prompt STANDALONE ALL_CONSTRAINTS
+          select owner,table_name,constraint_name,constraint_type,index_owner,index_name from all_constraints where owner='SYSTEM' and table_name='INDEX_METADATA';
+          prompt STANDALONE USER_CONSTRAINTS
+          select table_name,constraint_name,constraint_type,index_owner,index_name from user_constraints where table_name='INDEX_METADATA';
+          prompt ALL_INDEXES
+          select owner,index_name,table_owner,table_name,index_type from all_indexes where table_owner='SYSTEM' and table_name='INDEX_METADATA';
+          prompt CURRENT JOIN
+          select a.owner,a.index_name,c.constraint_type,c.index_owner,decode(c.constraint_type,'P',1,0) as is_primary from all_indexes a left join all_constraints c on c.owner=a.table_owner and c.index_owner=a.owner and c.index_name=a.index_name and c.constraint_type='P' where a.table_owner='SYSTEM' and a.table_name='INDEX_METADATA';
+          prompt JOIN WITHOUT INDEX_OWNER
+          select a.owner,a.index_name,c.constraint_type,c.index_owner,decode(c.constraint_type,'P',1,0) as is_primary from all_indexes a left join all_constraints c on c.owner=a.table_owner and c.index_name=a.index_name and c.constraint_type='P' where a.table_owner='SYSTEM' and a.table_name='INDEX_METADATA';
+          prompt COMPLETE QUERY
+          select i.index_owner,i.index_name as name,i.column_name as columns,e.column_expression as expression,i.descend as direction,a.index_type as type,decode(a.uniqueness,'UNIQUE',1,0) as "unique",decode(c.constraint_type,'P',1,0) as "primary" from all_ind_columns i join all_indexes a on a.owner=i.index_owner and a.index_name=i.index_name and a.table_owner=i.table_owner and a.table_name=i.table_name left join all_ind_expressions e on e.index_owner=i.index_owner and e.index_name=i.index_name and e.table_owner=i.table_owner and e.table_name=i.table_name and e.column_position=i.column_position left join all_constraints c on c.owner=a.table_owner and c.index_owner=a.owner and c.index_name=a.index_name and c.constraint_type='P' where i.table_owner='SYSTEM' and i.table_name='INDEX_METADATA' and a.index_type<>'LOB' order by i.index_owner,i.index_name,i.column_position;
+          exit
+          SQL
