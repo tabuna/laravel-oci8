@@ -5,6 +5,7 @@ namespace Yajra\Oci8\Eloquent;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Query\Builder as IlluminateQueryBuilder;
+use LogicException;
 use Yajra\Oci8\Oci8Connection;
 use Yajra\Oci8\Query\Grammars\OracleGrammar;
 use Yajra\Oci8\Query\OracleBuilder as QueryBuilder;
@@ -14,21 +15,21 @@ class OracleEloquent extends Model
     /**
      * List of binary (blob) columns.
      *
-     * @var array
+     * @var list<string>
      */
     protected $binaries = [];
 
     /**
      * List of binary fields for storage.
      *
-     * @var array
+     * @var array<string, mixed>
      */
     protected $binaryFields = [];
 
     /**
      * Sequence name variable.
      *
-     * @var string
+     * @var string|null
      */
     public $sequence = null;
 
@@ -73,6 +74,9 @@ class OracleEloquent extends Model
 
     /**
      * Update the model in the database.
+     *
+     * @param  array<string, mixed>  $attributes
+     * @param  array{touch?: bool|null}  $options
      */
     public function update(array $attributes = [], array $options = []): bool|int
     {
@@ -83,9 +87,9 @@ class OracleEloquent extends Model
         // If dirty attributes contains binary field
         // extract binary fields to new array
         if ($this->extractBinaries($attributes)) {
-            return $this->setKeysForSaveQuery($this->newQuery())
-                ->getQuery()
-                ->updateLob($attributes, $this->binaryFields, $this->getKeyName());
+            $query = $this->setKeysForSaveQuery($this->newQuery());
+
+            return $this->oracleQuery($query)->updateLob($attributes, $this->binaryFields, $this->getKeyName());
         }
 
         return $this->fill($attributes)->save($options);
@@ -93,6 +97,9 @@ class OracleEloquent extends Model
 
     /**
      * Extract binary fields from given attributes.
+     *
+     * @param  array<string, mixed>  $attributes
+     * @return array<string, mixed>
      */
     protected function extractBinaries(array &$attributes): array
     {
@@ -113,6 +120,8 @@ class OracleEloquent extends Model
 
     /**
      * Check if attributes contains binary field.
+     *
+     * @param  array<string, mixed>  $attributes
      */
     protected function checkBinary(array $attributes): bool
     {
@@ -195,12 +204,16 @@ class OracleEloquent extends Model
 
     /**
      * Update model with binary (blob) fields.
+     *
+     * @param  Builder<static>  $query
+     * @param  array<string, mixed>  $dirty
      */
     protected function updateBinary(Builder $query, array $dirty): void
     {
         $builder = $this->setKeysForSaveQuery($query);
 
         if ($this->extractBinaries($dirty)) {
+            // @phpstan-ignore method.notFound (Eloquent forwards to OracleBuilder or a custom macro.)
             $builder->updateLob($dirty, $this->binaryFields, $this->getKeyName());
         } else {
             $builder->update($dirty);
@@ -243,7 +256,7 @@ class OracleEloquent extends Model
             // If attributes contains binary field
             // extract binary fields to new array
             if ($this->extractBinaries($attributes)) {
-                $query->getQuery()->insertLob($attributes, $this->binaryFields, $this->getKeyName());
+                $this->oracleQuery($query)->insertLob($attributes, $this->binaryFields, $this->getKeyName());
             } else {
                 $query->insert($attributes);
             }
@@ -264,14 +277,26 @@ class OracleEloquent extends Model
     /**
      * Insert the given attributes and set the ID on the model.
      *
-     * @param  array  $attributes
+     * @param  array<string, mixed>  $attributes
      */
     protected function insertAndSetId(Builder $query, $attributes): void
     {
         $id = ($binaries = $this->extractBinaries($attributes)) ?
-            $query->getQuery()->insertLob($attributes, $binaries, $keyName = $this->getKeyName()) :
+            $this->oracleQuery($query)->insertLob($attributes, $binaries, $keyName = $this->getKeyName()) :
             $query->insertGetId($attributes, $keyName = $this->getKeyName());
 
         $this->setAttribute($keyName, $id);
+    }
+
+    /** @param Builder<static> $query */
+    private function oracleQuery(Builder $query): QueryBuilder
+    {
+        $builder = $query->getQuery();
+
+        if (! $builder instanceof QueryBuilder) {
+            throw new LogicException('Binary attributes require an Oracle query builder.');
+        }
+
+        return $builder;
     }
 }

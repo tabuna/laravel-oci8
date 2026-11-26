@@ -6,12 +6,16 @@ parameters:
     paths:
         - src
 
-    level: 1
+    level: max
+
+    stubFiles:
+        - stubs/IlluminateDatabase.stub
 
     ignoreErrors:
-        - '#Unsafe usage of new static\(\).#'
-
-    excludePaths:
+        # Eloquent models instantiate subclasses with their own constructors.
+        -
+            identifier: new.static
+            path: src/Oci8/Eloquent/OracleEloquent.php
+            count: 1
 
     noEnvCallsOutsideOfConfig: false
-    treatPhpDocTypesAsCertain: false

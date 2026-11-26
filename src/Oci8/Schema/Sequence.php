@@ -3,6 +3,7 @@
 namespace Yajra\Oci8\Schema;
 
 use Illuminate\Database\QueryException;
+use RuntimeException;
 use Yajra\Oci8\Oci8Connection;
 
 class Sequence
@@ -63,7 +64,7 @@ class Sequence
     {
         $name = $this->wrap($name);
 
-        return $this->connection->selectOne("SELECT $name.NEXTVAL as \"id\" FROM DUAL")->id;
+        return $this->readValue("SELECT $name.NEXTVAL as \"id\" FROM DUAL");
     }
 
     public function currentValue(string $name): int
@@ -80,10 +81,19 @@ class Sequence
         }
 
         try {
-            return $this->connection->selectOne("select {$name}.currval as \"id\" from dual")->id;
+            return $this->readValue("select {$name}.currval as \"id\" from dual");
         } catch (QueryException) {
             return 0;
         }
+    }
+
+    /** @throws QueryException */
+    private function readValue(string $sql): int
+    {
+        $row = (array) $this->connection->selectOne($sql);
+        $id = filter_var($row['id'] ?? null, FILTER_VALIDATE_INT);
+
+        return $id === false ? throw new RuntimeException('Oracle did not return an integer sequence value.') : $id;
     }
 
     public function forceCreate(string $name): bool

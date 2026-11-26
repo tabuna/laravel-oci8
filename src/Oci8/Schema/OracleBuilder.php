@@ -4,7 +4,9 @@ namespace Yajra\Oci8\Schema;
 
 use Closure;
 use Illuminate\Database\Schema\Builder;
+use LogicException;
 use Yajra\Oci8\Oci8Connection;
+use Yajra\Oci8\Schema\Grammars\OracleGrammar;
 
 /**
  * @property Oci8Connection $connection
@@ -136,29 +138,21 @@ class OracleBuilder extends Builder
      */
     public function getColumnListing($table): array
     {
-        $database = $this->connection->getConfig('username');
+        $database = $this->configuredUsername() ?? '';
         $table = $this->connection->getTablePrefix().$table;
-        /** @var Grammars\OracleGrammar $grammar */
-        $grammar = $this->grammar;
-        $results = $this->connection->select($grammar->compileColumnExists($database, $table));
+        /** @var list<object|array<string, mixed>> $results */
+        $results = $this->connection->select($this->grammar->compileColumnExists($database, $table));
 
-        return $this->connection->getPostProcessor()->processColumnListing($results);
-    }
+        $process = [$this->connection->getPostProcessor(), 'processColumnListing'];
 
-    /**
-     * Get the columns for a given table.
-     *
-     * @param  string  $table
-     */
-    public function getColumns($table): array
-    {
-        [$schema, $table] = $this->parseSchemaAndTable($table);
+        if (! is_callable($process)) {
+            throw new LogicException('The Oracle schema processor must provide processColumnListing.');
+        }
 
-        $table = $this->connection->getTablePrefix().$table;
+        /** @var list<string> $columns */
+        $columns = $process($results);
 
-        return $this->connection->getPostProcessor()->processColumns(
-            $this->connection->selectFromWriteConnection($this->grammar->compileColumns($schema, $table))
-        );
+        return $columns;
     }
 
     /**
@@ -174,7 +168,7 @@ class OracleBuilder extends Builder
         // We will use the default schema unless the schema has been specified in the
         // query. If the schema has been specified in the query then we can use it
         // instead of a default schema configured in the connection search path.
-        $schema = $this->connection->getConfig('username');
+        $schema = $this->configuredUsername();
 
         if (count($parts) === 2) {
             $schema = $parts[0];
@@ -185,30 +179,12 @@ class OracleBuilder extends Builder
     }
 
     /**
-     * Get the indexes for a given table.
-     *
-     * @param  string  $table
-     */
-    public function getIndexes($table): array
-    {
-        [$schema, $table] = $this->parseSchemaAndTable($table);
-
-        $table = $this->connection->getTablePrefix().$table;
-
-        return $this->connection->getPostProcessor()->processIndexes(
-            $this->connection->selectFromWriteConnection(
-                $this->grammar->compileIndexes($schema, $table)
-            )
-        );
-    }
-
-    /**
      * Disable foreign key constraints.
      */
     public function disableForeignKeyConstraints(): bool
     {
         return $this->connection->statement(
-            $this->grammar->compileDisableForeignKeyConstraints($this->connection->getConfig('username'))
+            $this->grammar->compileDisableForeignKeyConstraints($this->configuredUsername() ?? '')
         );
     }
 
@@ -218,20 +194,22 @@ class OracleBuilder extends Builder
     public function enableForeignKeyConstraints(): bool
     {
         return $this->connection->statement(
-            $this->grammar->compileEnableForeignKeyConstraints($this->connection->getConfig('username'))
+            $this->grammar->compileEnableForeignKeyConstraints($this->configuredUsername() ?? '')
         );
     }
 
     /**
      * Get the tables that belong to the database.
+     *
+     * @param  string|null  $schema
      */
     public function getTables($schema = null): array
     {
-        return $this->connection->getPostProcessor()->processTables(
-            $this->connection->selectFromWriteConnection(
-                $this->grammar->compileTables($schema ?? $this->connection->getConfig('username'))
-            )
-        );
+        $sql = $this->grammar->compileTables($schema ?? $this->configuredUsername() ?? '');
+        /** @var list<object|array<string, mixed>> $results */
+        $results = $this->connection->selectFromWriteConnection($sql);
+
+        return $this->connection->getPostProcessor()->processTables($results);
     }
 
     /**
@@ -242,5 +220,12 @@ class OracleBuilder extends Builder
     public function getCurrentSchemaListing(): array
     {
         return [$this->connection->getSchema()];
+    }
+
+    private function configuredUsername(): ?string
+    {
+        $username = $this->connection->getConfig('username');
+
+        return is_string($username) ? $username : null;
     }
 }

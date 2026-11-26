@@ -2,65 +2,93 @@
 
 namespace Yajra\Oci8\Query\Processors;
 
-use DateTime;
+use DateTimeInterface;
+use Illuminate\Database\Connection;
 use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Query\Builder;
-use Illuminate\Database\Query\Expression;
 use Illuminate\Database\Query\Processors\Processor;
+use LogicException;
 use PDO;
 use PDOStatement;
+use RuntimeException;
+use stdClass;
+use Stringable;
 use Yajra\Oci8\Oci8Connection;
 
+/**
+ * @phpstan-type ColumnMetadata object{
+ *     name: string, type_name: string, type: string, precision: int|numeric-string|null,
+ *     places: int|numeric-string|null, data_length: int|numeric-string|null, char_length: int|numeric-string|null,
+ *     collation: string|null, nullable: int|numeric-string, default: string|null,
+ *     auto_increment: int|numeric-string|null, comment: string|null, generated: string|null
+ * }
+ * @phpstan-type IndexMetadata object{
+ *     index_owner: string, name: string, columns: string, expression: string|null, direction: string,
+ *     type: string, unique: int|numeric-string, primary: int|numeric-string
+ * }
+ * @phpstan-type ForeignKeyMetadata object{
+ *     name: string, columns: string, foreign_schema: string, foreign_table: string,
+ *     foreign_columns: string, on_update: string|null, on_delete: string|null
+ * }
+ * @phpstan-type TypeMetadata object{name: string, schema: string, type: string, category: string, implicit: int|numeric-string}
+ * @phpstan-type Index array{name: string, columns: list<string>, type: string, unique: bool, primary: bool, directions: list<string>}
+ * @phpstan-type Column array{
+ *     name: string, type_name: string, type: string, collation: string|null, nullable: bool, default: string|null,
+ *     auto_increment: bool, comment: string|null, generation: array{type: string, expression: string|null}|null,
+ *     length: int, precision: int
+ * }
+ */
 class OracleProcessor extends Processor
 {
     /**
      * Process an "insert get ID" query.
      *
      * @param  string  $sql
-     * @param  array  $values
+     * @param  list<mixed>  $values
      * @param  null|string  $sequence
      */
     public function processInsertGetId(Builder $query, $sql, $values, $sequence = null): int
     {
-        /** @var Oci8Connection $connection */
         $connection = $query->getConnection();
+
+        if (! $connection instanceof Oci8Connection) {
+            throw new LogicException('Inserting an Oracle ID requires an Oracle connection.');
+        }
+
         $values = $this->incrementBySequence($values, $sequence);
 
         return $connection->insertGetId($sql, $values);
     }
 
     /**
-     * Get prepared statement.
-     */
-    private function prepareStatement(Builder $query, string $sql): PDOStatement|false
-    {
-        /** @var Oci8Connection $connection */
-        $connection = $query->getConnection();
-        $pdo = $connection->getPdo();
-
-        return $pdo->prepare($sql);
-    }
-
-    /**
      * Insert a new record and get the value of the primary key.
+     *
+     * @param  list<mixed>  $values
+     * @return list<mixed>
      */
     protected function incrementBySequence(array $values, ?string $sequence = null): array
     {
-        $builder = debug_backtrace(DEBUG_BACKTRACE_PROVIDE_OBJECT, 5)[3]['object'];
-        $builderArgs = debug_backtrace(DEBUG_BACKTRACE_PROVIDE_OBJECT, 5)[2]['args'];
+        $trace = debug_backtrace(DEBUG_BACKTRACE_PROVIDE_OBJECT, 4);
+        $caller = $trace[3] ?? [];
+        $builder = $caller['object'] ?? null;
+        $arguments = $caller['args'][1] ?? null;
+        $record = is_array($arguments) ? ($arguments[0] ?? $arguments['values'] ?? null) : null;
 
-        if (! isset($builderArgs[1][0][$sequence])) {
-            if ($builder instanceof EloquentBuilder) {
-                /** @var Model $model */
-                $model = $builder->getModel();
+        if ($builder instanceof EloquentBuilder) {
+            $model = $builder->getModel();
+            $sequenceName = $model->sequence ?? null;
+            $connection = $model->getConnection();
 
-                /** @var Oci8Connection $connection */
-                $connection = $model->getConnection();
-                if (isset($model->sequence) && $model->incrementing) {
-                    $connection->recordsHaveBeenModified();
-                    $values[] = $connection->getSequence()->nextValue($model->sequence);
-                }
+            if (
+                is_string($sequenceName)
+                && $sequenceName !== ''
+                && $model->incrementing
+                && is_array($record)
+                && ! array_key_exists($model->getKeyName(), $record)
+                && $connection instanceof Oci8Connection
+            ) {
+                $connection->recordsHaveBeenModified();
+                $values[] = $connection->getSequence()->nextValue($sequenceName);
             }
         }
 
@@ -69,16 +97,20 @@ class OracleProcessor extends Processor
 
     /**
      * Bind values to PDO statement.
+     *
+     * @param  list<mixed>  $values
      */
     private function bindValues(Builder $query, array &$values, PDOStatement $statement, int $parameter): int
     {
         $count = count($values);
         for ($i = 0; $i < $count; $i++) {
             if (is_object($values[$i])) {
-                if ($values[$i] instanceof DateTime) {
+                if ($values[$i] instanceof DateTimeInterface) {
                     $values[$i] = $values[$i]->format($query->grammar->getDateFormat());
-                } else {
+                } elseif ($values[$i] instanceof Stringable) {
                     $values[$i] = (string) $values[$i];
+                } else {
+                    throw new LogicException('An Oracle binding object must be convertible to a string.');
                 }
             }
             $type = $this->getPdoType($values[$i]);
@@ -92,7 +124,7 @@ class OracleProcessor extends Processor
     /**
      * Get the elapsed time since a given starting point.
      *
-     * @param  int  $start
+     * @param  float  $start
      * @return float
      */
     protected function getElapsedTime($start)
@@ -122,17 +154,27 @@ class OracleProcessor extends Processor
 
     /**
      * Save Query with Blob returning primary key value.
+     *
+     * @param  list<mixed>  $values
+     * @param  list<mixed>  $binaries
      */
     public function saveLob(Builder $query, string $sql, array $values, array $binaries): int
     {
         $connection = $query->getConnection();
+
+        if (! $connection instanceof Connection) {
+            throw new LogicException('Saving an Oracle LOB requires a database connection.');
+        }
 
         $connection->recordsHaveBeenModified();
         $start = microtime(true);
 
         $id = 0;
         $parameter = 1;
-        $statement = $this->prepareStatement($query, $sql);
+        $statement = $connection->getPdo()->prepare($sql);
+        if ($statement === false) {
+            throw new RuntimeException('Could not prepare the Oracle LOB statement.');
+        }
 
         $parameter = $this->bindValues($query, $values, $statement, $parameter);
 
@@ -151,18 +193,24 @@ class OracleProcessor extends Processor
 
         $connection->logQuery($sql, $values, $this->getElapsedTime($start));
 
-        return $id;
+        $id = filter_var($id, FILTER_VALIDATE_INT);
+
+        return $id === false ? throw new RuntimeException('Oracle did not return an integer LOB ID.') : $id;
     }
 
     /**
      * Process the results of a column listing query.
+     *
+     * @param  list<object|array<string, mixed>>  $results
+     * @return list<string>
      */
     public function processColumnListing(array $results): array
     {
         $mapping = function ($r) {
-            $r = (object) $r;
+            /** @var stdClass&object{column_name: string} $row */
+            $row = (object) $r;
 
-            return strtolower((string) $r->column_name);
+            return strtolower($row->column_name);
         };
 
         return array_map($mapping, $results);
@@ -171,11 +219,13 @@ class OracleProcessor extends Processor
     /**
      * Process the results of a columns query.
      *
-     * @param  array  $results
+     * @param  list<object|array<string, mixed>>  $results
+     * @return list<Column>
      */
     public function processColumns($results): array
     {
         return array_map(function ($result) {
+            /** @var stdClass&ColumnMetadata $result */
             $result = (object) $result;
 
             $type = strtolower((string) $result->type);
@@ -232,11 +282,12 @@ class OracleProcessor extends Processor
     /**
      * Process the results of a types query.
      *
-     * @param  array  $results
+     * @param  list<object|array<string, mixed>>  $results
      */
     public function processTypes($results): array
     {
         return array_map(function ($result) {
+            /** @var stdClass&TypeMetadata $result */
             $result = (object) $result;
 
             return [
@@ -253,11 +304,12 @@ class OracleProcessor extends Processor
     /**
      * Process the results of a columns query.
      *
-     * @param  array  $results
+     * @param  list<object|array<string, mixed>>  $results
      */
     public function processForeignKeys($results): array
     {
         return array_map(function ($result) {
+            /** @var stdClass&ForeignKeyMetadata $result */
             $result = (object) $result;
 
             return [
@@ -275,13 +327,15 @@ class OracleProcessor extends Processor
     /**
      * Process the results of an indexes query.
      *
-     * @param  array  $results
+     * @param  list<object|array<string, mixed>>  $results
+     * @return list<Index>
      */
     public function processIndexes($results): array
     {
         $indexes = [];
 
         foreach ($results as $result) {
+            /** @var stdClass&IndexMetadata $result */
             $result = (object) $result;
             $owner = (string) $result->index_owner;
             $name = (string) $result->name;
@@ -297,21 +351,27 @@ class OracleProcessor extends Processor
             $indexes[$owner][$name]['directions'][] = strtolower((string) $result->direction);
         }
 
-        return collect($indexes)->flatten(1)->all();
+        $metadata = [];
+        foreach ($indexes as $ownerIndexes) {
+            foreach ($ownerIndexes as $index) {
+                $metadata[] = $index;
+            }
+        }
+
+        return $metadata;
     }
 
     /**
      * Process the results of a "select" query.
      *
-     * @param  array  $results
-     * @return array
+     * @param  array<mixed>  $results
+     * @return array<mixed>
      */
     public function processSelect(Builder $query, $results)
     {
-        /** @var Oci8Connection $connection */
         $connection = $query->getConnection();
 
-        if (method_exists($connection, 'isVersionBelow') && $connection->isVersionBelow('12c') && (isset($query->limit) || isset($query->offset)) && ! $this->rnColumnSelected($query) && is_array($results)) {
+        if ($connection instanceof Oci8Connection && $connection->isVersionBelow('12c') && (isset($query->limit) || isset($query->offset)) && ! $this->rnColumnSelected($query)) {
             return array_map(function ($row) {
                 if (is_object($row) && isset($row->rn)) {
                     unset($row->rn);
@@ -330,11 +390,7 @@ class OracleProcessor extends Processor
     private function rnColumnSelected(Builder $query): bool
     {
         foreach (($query->columns ?? []) as $column) {
-            $value = $column instanceof Expression
-                ? $column->getValue($query->getGrammar())
-                : (string) $column;
-
-            $value = trim($value);
+            $value = trim((string) $query->getGrammar()->getValue($column));
 
             if ($value === 'rn' || preg_match('/\srn$/i', $value)) {
                 return true;

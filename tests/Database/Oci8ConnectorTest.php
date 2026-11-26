@@ -75,6 +75,21 @@ class Oci8ConnectorTest extends TestCase
     public static function tnsDataProvider(): array
     {
         return [
+            'single host array' => [
+                '(DESCRIPTION = (ADDRESS = (PROTOCOL = TCP)(HOST = oracle.host)(PORT = 1521)) (CONNECT_DATA =(SID = ORCL)))',
+                ['driver' => 'oracle', 'host' => ['oracle.host'], 'database' => 'ORCL'],
+            ],
+            'multiple host array with numeric server version' => [
+                '(DESCRIPTION = (ADDRESS = (PROTOCOL = TCP)(HOST = localhost)(PORT = 1234))(ADDRESS = (PROTOCOL = TCP)(HOST = oracle.host)(PORT = 1234)) (LOAD_BALANCE = yes) (FAILOVER = on) (EXPIRE_TIME = 2) (CONNECT_DATA = (SERVER = DEDICATED) (SID = ORCL)))',
+                [
+                    'driver' => 'oracle',
+                    'host' => ['localhost', 'oracle.host'],
+                    'port' => 1234,
+                    'database' => 'ORCL',
+                    'server_version' => 19,
+                    'expire_time' => 2,
+                ],
+            ],
             // multiple hosts SID
             [
                 '(DESCRIPTION = (ADDRESS = (PROTOCOL = TCP)(HOST = localhost)(PORT = 1234))(ADDRESS = (PROTOCOL = TCP)(HOST = oracle.host)(PORT = 1234)) (LOAD_BALANCE = yes) (FAILOVER = on) (CONNECT_DATA = (SERVER = DEDICATED) (SID = ORCL)))',

@@ -30,6 +30,7 @@ class OracleBlueprint extends Blueprint
      * Create a default index name for the table.
      *
      * @param  string  $type
+     * @param  array<string>  $columns
      */
     protected function createIndexName($type, array $columns): string
     {
@@ -60,7 +61,7 @@ class OracleBlueprint extends Blueprint
                 $index = implode('_', $parts);
             }
         } else {
-            $index = mb_substr($this->table, 0, 9).'_comp_'.str_replace('.', '_', microtime(true));
+            $index = mb_substr($this->table, 0, 9).'_comp_'.str_replace('.', '_', (string) microtime(true));
         }
 
         return $index;

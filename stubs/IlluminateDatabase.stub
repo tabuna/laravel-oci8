@@ -1,0 +1,55 @@
+<?php
+
+namespace Illuminate\Database\Query\Grammars;
+
+use Illuminate\Database\Query\Builder;
+
+class Grammar
+{
+    /** @return array<string, string> */
+    protected function compileComponents(Builder $query) {}
+
+    /**
+     * @param string $column
+     * @return array{string, string}
+     */
+    protected function wrapJsonFieldAndPath($column) {}
+}
+
+namespace Illuminate\Database\Schema;
+
+/**
+ * @property string $name
+ * @property string $type
+ * @property int|null $length
+ * @property int|null $precision
+ * @property int $total
+ * @property int $places
+ * @property bool|null $autoIncrement
+ * @property bool|null $always
+ * @property bool|null $change
+ * @property bool|null $invisible
+ * @property bool|null $nocache
+ * @property bool|null $nullable
+ * @property bool|null $onNull
+ * @property bool|null $useCurrent
+ * @property string|null $collation
+ * @property string|null $comment
+ * @property mixed $default
+ * @property list<string>|null $allowed
+ * @property string|bool|null $generatedAs
+ * @property string|\Illuminate\Contracts\Database\Query\Expression|null $virtualAs
+ */
+class ColumnDefinition {}
+
+
+namespace Illuminate\Database\Query\Processors;
+
+class Processor
+{
+    /**
+     * @param list<object|array<string, mixed>> $results
+     * @return list<array{name: string, schema: string|null, schema_qualified_name: string, size: int|null, comment: string|null, collation: string|null, engine: string|null}>
+     */
+    public function processTables($results) {}
+}

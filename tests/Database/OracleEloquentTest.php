@@ -5,6 +5,7 @@ namespace Yajra\Oci8\Tests\Database;
 use Illuminate\Database\Connection;
 use Illuminate\Database\ConnectionInterface;
 use Illuminate\Database\ConnectionResolverInterface;
+use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Database\Query\Grammars\MySqlGrammar;
 use Illuminate\Database\Query\Grammars\PostgresGrammar;
@@ -15,6 +16,7 @@ use Illuminate\Database\Query\Processors\PostgresProcessor;
 use Illuminate\Database\Query\Processors\SQLiteProcessor;
 use Illuminate\Database\Query\Processors\SqlServerProcessor;
 use Mockery as m;
+use PDO;
 use PHPUnit\Framework\TestCase;
 use Yajra\Oci8\Eloquent\OracleEloquent;
 use Yajra\Oci8\Oci8Connection;
@@ -34,12 +36,57 @@ class OracleEloquentTest extends TestCase
         $model = new OracleEloquentStub;
         $this->mockConnectionForModel($model, 'Oracle');
 
-        /** @var \Illuminate\Database\Eloquent\Builder $builder */
+        /** @var EloquentBuilder $builder */
         $builder = $model->newQuery()->getQuery();
 
         $this->assertInstanceOf(OracleBuilder::class, $builder);
         $this->assertInstanceOf(OracleGrammar::class, $builder->getGrammar());
         $this->assertInstanceOf(OracleProcessor::class, $builder->getProcessor());
+    }
+
+    public function test_saving_a_lob_uses_a_custom_eloquent_builder_method(): void
+    {
+        $pdo = m::mock(PDO::class);
+        $pdo->shouldNotReceive('prepare');
+        $resolver = m::mock(ConnectionResolverInterface::class);
+        $resolver->shouldReceive('connection')->andReturn(new Oci8Connection($pdo));
+
+        $model = new class extends OracleEloquent
+        {
+            public $timestamps = false;
+
+            protected $table = 'users';
+
+            protected $binaries = ['avatar'];
+
+            public array $writtenBinaries = [];
+
+            public function newEloquentBuilder($query): EloquentBuilder
+            {
+                return new class($query) extends EloquentBuilder
+                {
+                    public function updateLob($values, $binaries, $sequence): bool
+                    {
+                        $this->getModel()->writtenBinaries = $binaries;
+
+                        return true;
+                    }
+                };
+            }
+        };
+
+        $model::setConnectionResolver($resolver);
+
+        try {
+            $model->exists = true;
+            $model->setRawAttributes(['id' => 42, 'avatar' => 'old'], true);
+            $model->avatar = 'new';
+
+            $this->assertTrue($model->save());
+            $this->assertSame(['avatar' => 'new'], $model->writtenBinaries);
+        } finally {
+            $model::unsetConnectionResolver();
+        }
     }
 
     protected function mockConnectionForModel($model, $database)

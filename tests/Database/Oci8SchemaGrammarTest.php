@@ -3,11 +3,16 @@
 namespace Yajra\Oci8\Tests\Database;
 
 use Illuminate\Database\Query\Expression;
+use Illuminate\Database\Query\Processors\Processor;
+use InvalidArgumentException;
 use LogicException;
 use Mockery as m;
+use PDO;
+use PDOStatement;
 use PHPUnit\Framework\TestCase;
 use Yajra\Oci8\Oci8Connection as Connection;
 use Yajra\Oci8\Schema\Grammars\OracleGrammar;
+use Yajra\Oci8\Schema\OracleAutoIncrementHelper;
 use Yajra\Oci8\Schema\OracleBlueprint as Blueprint;
 use Yajra\Oci8\Schema\OracleBuilder;
 
@@ -39,6 +44,55 @@ class Oci8SchemaGrammarTest extends TestCase
             'create table "USERS" ( "ID" number(10,0) not null, "EMAIL" varchar2(255) not null, constraint "USERS_ID_PK" primary key ( "ID" ) )',
             $statements[0]
         );
+    }
+
+    public function test_auto_increment_rejects_an_out_of_range_sequence_start_before_ddl(): void
+    {
+        $pdo = m::mock(PDO::class);
+        $pdo->shouldNotReceive('prepare');
+        $connection = new Connection($pdo);
+        $connection->getSchemaBuilder();
+        $blueprint = new Blueprint($connection, 'users');
+        $blueprint->increments('id')->from(PHP_INT_MAX.'0');
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Oracle sequence start must be an integer in the PHP range.');
+
+        (new OracleAutoIncrementHelper($connection))->createAutoIncrementObjects($blueprint, 'users');
+    }
+
+    public function test_schema_builder_uses_the_configured_metadata_processor(): void
+    {
+        $statement = m::mock(PDOStatement::class);
+        $statement->shouldReceive('setFetchMode')->times(3)->with(PDO::FETCH_OBJ);
+        $statement->shouldReceive('execute')->times(3)->andReturn(true);
+        $statement->shouldReceive('fetchAll')->times(3)->andReturn([(object) ['label' => 'CUSTOM']]);
+        $pdo = m::mock(PDO::class);
+        $pdo->shouldReceive('prepare')->times(3)->andReturn($statement);
+
+        $connection = new Connection($pdo, config: ['username' => 'APP']);
+        $connection->setPostProcessor(new class extends Processor
+        {
+            public function processColumnListing($results): array
+            {
+                return [strtolower($results[0]->label)];
+            }
+
+            public function processColumns($results): array
+            {
+                return [['name' => $results[0]->label, 'type' => 'custom column']];
+            }
+
+            public function processIndexes($results): array
+            {
+                return [['name' => $results[0]->label, 'type' => 'custom index']];
+            }
+        });
+        $schema = $connection->getSchemaBuilder();
+
+        $this->assertSame(['custom'], $schema->getColumnListing('users'));
+        $this->assertSame([['name' => 'CUSTOM', 'type' => 'custom column']], $schema->getColumns('users'));
+        $this->assertSame([['name' => 'CUSTOM', 'type' => 'custom index']], $schema->getIndexes('users'));
     }
 
     public function test_basic_create_temporary_table()

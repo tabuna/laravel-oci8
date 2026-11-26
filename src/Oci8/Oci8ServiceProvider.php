@@ -3,12 +3,16 @@
 namespace Yajra\Oci8;
 
 use Illuminate\Auth\AuthServiceProvider;
+use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Database\Connection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\ServiceProvider;
 use Yajra\Oci8\Auth\OracleUserProvider;
 use Yajra\Oci8\Connectors\OracleConnector as Connector;
 
+/**
+ * @phpstan-import-type OracleConfig from Connector
+ */
 class Oci8ServiceProvider extends ServiceProvider
 {
     public function boot(): void
@@ -21,7 +25,10 @@ class Oci8ServiceProvider extends ServiceProvider
         // prevents errors when used with laravel-zero micro-framework which
         // doesn't need auth.
         if (class_exists(AuthServiceProvider::class)) {
-            Auth::provider('oracle', fn ($app, array $config) => new OracleUserProvider($app['hash'], $config['model']));
+            Auth::provider('oracle', function (Application $app, array $config) {
+                /** @var array{model: class-string} $config */
+                return new OracleUserProvider($app->make('hash'), $config['model']);
+            });
         }
     }
 
@@ -33,9 +40,10 @@ class Oci8ServiceProvider extends ServiceProvider
             $this->mergeConfigFrom(__DIR__.'/../config/oracle.php', 'database.connections');
         }
 
-        Connection::resolverFor('oracle', function ($connection, $database, $prefix, $config) {
-            if (! empty($config['dynamic'])) {
-                call_user_func_array($config['dynamic'], [&$config]);
+        Connection::resolverFor('oracle', function ($connection, string $database, string $prefix, array $config) {
+            /** @var OracleConfig $config */
+            if (is_callable($config['dynamic'] ?? null)) {
+                $config['dynamic']($config);
             }
 
             $connector = new Connector;

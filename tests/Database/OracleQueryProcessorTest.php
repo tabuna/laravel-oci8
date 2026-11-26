@@ -10,6 +10,7 @@ use Mockery as m;
 use PDO;
 use PDOException;
 use PDOStatement;
+use PHPUnit\Framework\Attributes\TestWith;
 use PHPUnit\Framework\TestCase;
 use Yajra\Oci8\Oci8Connection;
 use Yajra\Oci8\Query\Processors\OracleProcessor;
@@ -164,7 +165,9 @@ class OracleQueryProcessorTest extends TestCase
         $connection->table('users')->insertGetId([]);
     }
 
-    public function test_explicit_sequence_uses_the_write_connection_when_sticky_is_enabled(): void
+    #[TestWith([[['name' => 'Taylor']]])]
+    #[TestWith([['values' => ['name' => 'Taylor']]])]
+    public function test_explicit_sequence_uses_the_write_connection_when_sticky_is_enabled(array $arguments): void
     {
         $sequenceStatement = m::mock(PDOStatement::class);
         $sequenceStatement->shouldReceive('setFetchMode')->once()->with(PDO::FETCH_OBJ);
@@ -202,9 +205,61 @@ class OracleQueryProcessorTest extends TestCase
                 protected $table = 'users';
             };
 
-            $this->assertSame(41, $model->newQuery()->insertGetId(['name' => 'Taylor']));
+            $this->assertSame(41, $model->newQuery()->insertGetId(...$arguments));
         } finally {
             Model::unsetConnectionResolver();
         }
+    }
+
+    public function test_insert_get_id_with_explicit_key_skips_configured_sequence(): void
+    {
+        $writePdo = m::mock(PDO::class);
+        $writePdo->shouldNotReceive('prepare');
+        $connection = new Oci8Connection($writePdo);
+        $resolver = m::mock(ConnectionResolverInterface::class);
+        $resolver->shouldReceive('connection')->andReturn($connection);
+        Model::setConnectionResolver($resolver);
+
+        try {
+            $model = new class extends Model
+            {
+                public $sequence = 'users_id_seq';
+
+                protected $table = 'users';
+            };
+
+            $queries = $connection->pretend(fn () => $model->newQuery()->insertGetId(['id' => 42, 'status' => 7]));
+
+            $this->assertCount(1, $queries);
+            $this->assertSame('insert into "USERS" ("ID", "STATUS") values (42, 7) returning "ID" into ?', $queries[0]['query']);
+            $this->assertSame([42, 7], $queries[0]['bindings']);
+        } finally {
+            Model::unsetConnectionResolver();
+        }
+    }
+
+    public function test_insert_lob_formats_immutable_dates_and_returns_the_bound_id(): void
+    {
+        $statement = m::mock(PDOStatement::class);
+        $statement->shouldReceive('bindParam')->once()->with(1, '2026-11-26 12:34:56', PDO::PARAM_STR)->andReturn(true);
+        $statement->shouldReceive('bindParam')->once()->with(2, 'binary contents', PDO::PARAM_LOB, -1)->andReturn(true);
+        $statement->shouldReceive('bindParam')->once()->with(3, m::any(), PDO::PARAM_INT, -1)
+            ->andReturnUsing(function ($parameter, &$id) {
+                $id = '42';
+
+                return true;
+            });
+        $statement->shouldReceive('execute')->once()->andReturn(true);
+
+        $pdo = m::mock(PDO::class);
+        $pdo->shouldReceive('prepare')->once()
+            ->with('insert into "USERS" ("CREATED_AT", "AVATAR") values (?, EMPTY_BLOB()) returning "AVATAR", "ID" into ?, ?')
+            ->andReturn($statement);
+
+        $connection = new Oci8Connection($pdo);
+
+        $id = $connection->table('users')->insertLob(['created_at' => new DateTimeImmutable('2026-11-26 12:34:56')], ['avatar' => 'binary contents']);
+
+        $this->assertSame(42, $id);
     }
 }

@@ -2,8 +2,10 @@
 
 namespace Yajra\Oci8\Schema\Grammars;
 
+use Illuminate\Contracts\Database\Query\Expression as ExpressionContract;
 use Illuminate\Database\Query\Expression;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Database\Schema\ColumnDefinition;
 use Illuminate\Database\Schema\Grammars\Grammar;
 use Illuminate\Support\Fluent;
 use Illuminate\Support\Str;
@@ -14,6 +16,12 @@ use Yajra\Oci8\OracleReservedWords;
 
 /**
  * @property Oci8Connection $connection
+ *
+ * @phpstan-type ConstraintOptions object{deferrable: bool|null, initiallyImmediate: bool|null, notValid: bool|null}
+ * @phpstan-type IndexCommand Fluent<string, mixed>&object{index: string, columns: array<string|ExpressionContract>, online: bool|null, deferrable: bool|null, initiallyImmediate: bool|null, notValid: bool|null}
+ * @phpstan-type ForeignCommand Fluent<string, mixed>&object{index: string, columns: array<string>, on: string, references: string|array<string>, onDelete: string|null, deferrable: bool|null, initiallyImmediate: bool|null, notValid: bool|null}
+ * @phpstan-type ColumnCommand Fluent<string, mixed>&object{column: ColumnDefinition}
+ * @phpstan-type RenameCommand Fluent<string, mixed>&object{from: string, to: string}
  */
 class OracleGrammar extends Grammar
 {
@@ -27,12 +35,14 @@ class OracleGrammar extends Grammar
     /**
      * The possible column modifiers.
      *
-     * @var array
+     * @var array<string>
      */
     protected $modifiers = ['Collate', 'Invisible', 'Increment', 'VirtualAs', 'Nullable', 'Default', 'GeneratedAs', 'Json'];
 
     /**
      * The possible column serials.
+     *
+     * @var array<string>
      */
     protected array $serials = ['bigInteger', 'integer', 'mediumInteger', 'smallInteger', 'tinyInteger'];
 
@@ -44,7 +54,7 @@ class OracleGrammar extends Grammar
     /**
      * The commands to be executed outside of create or alter command.
      *
-     * @var array
+     * @var array<string>
      */
     protected $fluentCommands = ['Comment'];
 
@@ -70,10 +80,14 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a create table command.
+     *
+     * @param  Fluent<string, mixed>  $command
      */
     public function compileCreate(Blueprint $blueprint, Fluent $command): string
     {
-        $columns = implode(', ', $this->getColumns($blueprint));
+        /** @var list<string> $definitions */
+        $definitions = $this->getColumns($blueprint);
+        $columns = implode(', ', $definitions);
 
         $create = $blueprint->temporary ? 'create global temporary table ' : 'create table ';
 
@@ -156,6 +170,7 @@ class OracleGrammar extends Grammar
     {
         $sql = '';
 
+        /** @var array<ForeignCommand> $foreignKeys */
         $foreignKeys = $this->getCommandsByName($blueprint, 'foreign');
 
         // Once we have all the foreign key commands for the table creation statement
@@ -191,6 +206,7 @@ class OracleGrammar extends Grammar
      */
     protected function addPrimaryKeys(Blueprint $blueprint): ?string
     {
+        /** @var IndexCommand|null $primary */
         $primary = $this->getCommandByName($blueprint, 'primary');
 
         if (! is_null($primary)) {
@@ -217,7 +233,7 @@ class OracleGrammar extends Grammar
     {
         return sprintf(
             'select count(*) from all_tables where upper(owner) = upper(%s) and upper(table_name) = upper(%s)',
-            $this->quoteString($schema),
+            $this->quoteString($schema ?? ''),
             $this->quoteString($table)
         );
     }
@@ -238,7 +254,7 @@ class OracleGrammar extends Grammar
      */
     public function compileColumns($schema, $table): string
     {
-        $schema ??= $this->connection->getConfig('username');
+        $schema ??= $this->configuredUsername();
         $autoIncrement = $this->connection->isVersionAboveOrEqual('12c')
             ? "decode(t.identity_column, 'YES', 1, 0) as auto_increment,"
             : 'null as auto_increment,';
@@ -313,7 +329,7 @@ class OracleGrammar extends Grammar
      */
     public function compileForeignKeys($schema, $table): string
     {
-        $schema ??= $this->connection->getConfig('username');
+        $schema ??= $this->configuredUsername();
 
         return sprintf("
             select
@@ -348,7 +364,7 @@ class OracleGrammar extends Grammar
      */
     protected function compileOwnerWhereClause($schema, string $column = 'owner'): string
     {
-        $schema ??= $this->connection->getConfig('username');
+        $schema ??= $this->configuredUsername();
 
         if (is_array($schema)) {
             $schemas = implode(', ', array_map(
@@ -364,6 +380,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile an add column command.
+     *
+     * @param  ColumnCommand  $command
      */
     public function compileAdd(Blueprint $blueprint, Fluent $command): string
     {
@@ -375,6 +393,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a primary key command.
+     *
+     * @param  IndexCommand  $command
      */
     public function compilePrimary(Blueprint $blueprint, Fluent $command): ?string
     {
@@ -393,6 +413,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a foreign key command.
+     *
+     * @param  ForeignCommand  $command
      */
     public function compileForeign(Blueprint $blueprint, Fluent $command): ?string
     {
@@ -431,6 +453,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a unique key command.
+     *
+     * @param  IndexCommand  $command
      */
     public function compileUnique(Blueprint $blueprint, Fluent $command): string
     {
@@ -446,6 +470,9 @@ class OracleGrammar extends Grammar
         return $sql;
     }
 
+    /**
+     * @param  Fluent<string, mixed>&ConstraintOptions  $command
+     */
     protected function appendDeferrableClause(Fluent $command, string $sql): string
     {
         if (! is_null($command->deferrable)) {
@@ -459,6 +486,9 @@ class OracleGrammar extends Grammar
         return $sql;
     }
 
+    /**
+     * @param  Fluent<string, mixed>&ConstraintOptions  $command
+     */
     protected function appendNotValidClause(Fluent $command, string $sql): string
     {
         if (! is_null($command->notValid) && $command->notValid) {
@@ -470,6 +500,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a plain index key command.
+     *
+     * @param  IndexCommand  $command
      */
     public function compileIndex(Blueprint $blueprint, Fluent $command): string
     {
@@ -484,6 +516,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a fulltext index key command.
+     *
+     * @param  IndexCommand  $command
      */
     public function compileFullText(Blueprint $blueprint, Fluent $command): string
     {
@@ -518,6 +552,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a drop table command.
+     *
+     * @param  Fluent<string, mixed>  $command
      */
     public function compileDrop(Blueprint $blueprint, Fluent $command): string
     {
@@ -569,6 +605,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a drop table (if exists) command.
+     *
+     * @param  Fluent<string, mixed>  $command
      */
     public function compileDropIfExists(Blueprint $blueprint, Fluent $command): string
     {
@@ -594,6 +632,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a drop column command.
+     *
+     * @param  Fluent<string, mixed>&object{columns: array<string|ExpressionContract>}  $command
      */
     public function compileDropColumn(Blueprint $blueprint, Fluent $command): string
     {
@@ -606,6 +646,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a drop primary key command.
+     *
+     * @param  Fluent<string, mixed>&object{index: string}  $command
      */
     public function compileDropPrimary(Blueprint $blueprint, Fluent $command): string
     {
@@ -614,6 +656,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Drop a constraint from the table.
+     *
+     * @param  Fluent<string, mixed>&object{index: string}  $command
      */
     private function dropConstraint(Blueprint $blueprint, Fluent $command, string $type): string
     {
@@ -630,6 +674,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a drop unique key command.
+     *
+     * @param  Fluent<string, mixed>&object{index: string}  $command
      */
     public function compileDropUnique(Blueprint $blueprint, Fluent $command): string
     {
@@ -638,6 +684,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a drop index command.
+     *
+     * @param  Fluent<string, mixed>&object{index: string}  $command
      */
     public function compileDropIndex(Blueprint $blueprint, Fluent $command): string
     {
@@ -646,6 +694,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a drop foreign key command.
+     *
+     * @param  Fluent<string, mixed>&object{index: string}  $command
      */
     public function compileDropForeign(Blueprint $blueprint, Fluent $command): string
     {
@@ -654,6 +704,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a drop fulltext index command.
+     *
+     * @param  IndexCommand  $command
      */
     public function compileDropFullText(Blueprint $blueprint, Fluent $command): string
     {
@@ -663,7 +715,7 @@ class OracleGrammar extends Grammar
             return $this->compileDropIndex($blueprint, $command);
         }
 
-        $columns = array_map(fn ($column) => "'".strtoupper((string) $column)."'", $columns);
+        $columns = array_map(fn ($column) => "'".strtoupper((string) $this->getValue($column))."'", $columns);
         $columns = implode(', ', $columns);
 
         $dropFullTextSql = "for idx_rec in (select idx_name from ctx_user_indexes where idx_text_name in ($columns)) loop
@@ -675,6 +727,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a drop spatial index command.
+     *
+     * @param  Fluent<string, mixed>&object{index: string}  $command
      */
     public function compileDropSpatialIndex(Blueprint $blueprint, Fluent $command): string
     {
@@ -683,6 +737,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a comment command.
+     *
+     * @param  ColumnCommand  $command
      */
     public function compileComment(Blueprint $blueprint, Fluent $command): ?string
     {
@@ -706,6 +762,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a table comment command.
+     *
+     * @param  Fluent<string, mixed>&object{comment: string|null}  $command
      */
     public function compileTableComment(Blueprint $blueprint, Fluent $command): string
     {
@@ -717,6 +775,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a rename table command.
+     *
+     * @param  Fluent<string, mixed>&object{to: string}  $command
      */
     public function compileRename(Blueprint $blueprint, Fluent $command): string
     {
@@ -727,6 +787,9 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a rename column command.
+     *
+     * @param  RenameCommand  $command
+     * @return list<string>
      */
     public function compileRenameColumn(Blueprint $blueprint, Fluent $command): array
     {
@@ -740,6 +803,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a rename index command.
+     *
+     * @param  RenameCommand  $command
      */
     public function compileRenameIndex(Blueprint $blueprint, Fluent $command): string
     {
@@ -752,6 +817,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a char type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeChar(Fluent $column): string
     {
@@ -760,6 +827,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a string type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeString(Fluent $column): string
     {
@@ -768,6 +837,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a tiny text type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeTinyText(Fluent $column): string
     {
@@ -776,6 +847,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create column definition for a nvarchar type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeNvarchar2(Fluent $column): string
     {
@@ -784,6 +857,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a text type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeText(Fluent $column): string
     {
@@ -792,6 +867,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a medium text type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeMediumText(Fluent $column): string
     {
@@ -800,6 +877,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a long text type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeLongText(Fluent $column): string
     {
@@ -808,6 +887,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a integer type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeInteger(Fluent $column): string
     {
@@ -818,6 +899,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a integer type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeBigInteger(Fluent $column): string
     {
@@ -828,6 +911,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a medium integer type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeMediumInteger(Fluent $column): string
     {
@@ -838,6 +923,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a small integer type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeSmallInteger(Fluent $column): string
     {
@@ -848,6 +935,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a tiny integer type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeTinyInteger(Fluent $column): string
     {
@@ -858,6 +947,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a float type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeFloat(Fluent $column): string
     {
@@ -870,6 +961,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a real type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeReal(Fluent $column): string
     {
@@ -878,6 +971,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a double type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeDouble(Fluent $column): string
     {
@@ -886,6 +981,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a decimal type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeDecimal(Fluent $column): string
     {
@@ -894,6 +991,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a boolean type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeBoolean(Fluent $column): string
     {
@@ -902,6 +1001,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a enum type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeEnum(Fluent $column): string
     {
@@ -912,11 +1013,13 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a year type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeYear(Fluent $column): string
     {
         if ($column->useCurrent) {
-            $column->default(new Expression('EXTRACT(YEAR FROM CURRENT_DATE)'));
+            $column->set('default', new Expression('EXTRACT(YEAR FROM CURRENT_DATE)'));
         }
 
         return $this->typeInteger($column);
@@ -924,11 +1027,13 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a date type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeDate(Fluent $column): string
     {
         if ($column->useCurrent) {
-            $column->default(new Expression('CURRENT_DATE'));
+            $column->set('default', new Expression('CURRENT_DATE'));
         }
 
         return 'date';
@@ -936,11 +1041,13 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a date-time type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeDateTime(Fluent $column): string
     {
         if ($column->useCurrent) {
-            $column->default(new Expression('CURRENT_TIMESTAMP'));
+            $column->set('default', new Expression('CURRENT_TIMESTAMP'));
         }
 
         return 'date';
@@ -948,6 +1055,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a date-time type with timezone.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeDateTimeTz(Fluent $column): string
     {
@@ -956,6 +1065,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a time type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeTime(Fluent $column): string
     {
@@ -964,11 +1075,13 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a timestamp type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeTimestamp(Fluent $column): string
     {
         if ($column->useCurrent) {
-            $column->default(new Expression('CURRENT_TIMESTAMP'));
+            $column->set('default', new Expression('CURRENT_TIMESTAMP'));
         }
 
         return 'timestamp'.(is_null($column->precision) ? '' : "({$column->precision})");
@@ -976,6 +1089,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a timestamp type with timezone.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeTimestampTz(Fluent $column): string
     {
@@ -984,6 +1099,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a binary type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeBinary(Fluent $column): string
     {
@@ -992,6 +1109,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a uuid type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeUuid(Fluent $column): string
     {
@@ -1000,6 +1119,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for an IP address type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeIpAddress(Fluent $column): string
     {
@@ -1008,6 +1129,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a MAC address type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeMacAddress(Fluent $column): string
     {
@@ -1016,6 +1139,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a json type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeJson(Fluent $column): string
     {
@@ -1024,6 +1149,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Create the column definition for a jsonb type.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function typeJsonb(Fluent $column): string
     {
@@ -1032,6 +1159,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Get the SQL for a nullable column modifier.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function modifyNullable(Blueprint $blueprint, Fluent $column, ?bool $currentNullable = null): string
     {
@@ -1042,7 +1171,7 @@ class OracleGrammar extends Grammar
 
         // check if field is declared as enum
         $enum = '';
-        if (count((array) $column->allowed)) {
+        if ($column->allowed) {
             $columnName = $this->wrapValue($column->name);
             $allowed = implode(', ', array_map(
                 fn ($value) => $this->getDefaultValue($value),
@@ -1083,6 +1212,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Get the SQL for a default column modifier.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function modifyDefault(Blueprint $blueprint, Fluent $column): string
     {
@@ -1092,6 +1223,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Get the SQL for a JSON check constraint.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function modifyJson(Blueprint $blueprint, Fluent $column): ?string
     {
@@ -1108,6 +1241,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Get the SQL for an auto-increment column modifier.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function modifyIncrement(Blueprint $blueprint, Fluent $column): ?string
     {
@@ -1120,6 +1255,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Get the SQL for a generated virtual column modifier.
+     *
+     * @param  ColumnDefinition  $column
      *
      * @throws LogicException
      */
@@ -1154,6 +1291,9 @@ class OracleGrammar extends Grammar
 
     /**
      * Compile a change column command into a series of SQL statements.
+     *
+     * @param  ColumnCommand  $command
+     * @return list<string>|string
      */
     public function compileChange(Blueprint $blueprint, Fluent $command): array|string
     {
@@ -1175,13 +1315,15 @@ class OracleGrammar extends Grammar
             if (method_exists($this, $method = "modify{$modifier}")) {
                 // Pass current nullable state to modifyNullable for change operations
                 if ($modifier === 'Nullable' && $currentNullable !== null) {
-                    $constraints = (array) $this->{$method}($blueprint, $column, $currentNullable);
+                    $constraints = $this->modifyNullable($blueprint, $column, $currentNullable);
                 } else {
-                    $constraints = (array) $this->{$method}($blueprint, $column);
+                    $constraints = $this->{$method}($blueprint, $column);
                 }
 
-                foreach ($constraints as $constraint) {
-                    $changes[] = $constraint;
+                foreach ((array) $constraints as $constraint) {
+                    if (is_string($constraint)) {
+                        $changes[] = $constraint;
+                    }
                 }
             }
         }
@@ -1208,6 +1350,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Get the SQL for a collation column modifier.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function modifyCollate(Blueprint $blueprint, Fluent $column): ?string
     {
@@ -1220,6 +1364,8 @@ class OracleGrammar extends Grammar
 
     /**
      * Get the SQL for an invisible column modifier.
+     *
+     * @param  ColumnDefinition  $column
      */
     protected function modifyInvisible(Blueprint $blueprint, Fluent $column): ?string
     {
@@ -1243,19 +1389,9 @@ class OracleGrammar extends Grammar
      */
     protected function getCurrentColumnNullable(Blueprint $blueprint, string $columnName): ?bool
     {
-        // Check if connection is available and has the selectOne method
-        if (! isset($this->connection) || ! $this->connection) {
-            return null;
-        }
-
-        // Check if connection has selectOne method (might be mocked)
-        if (! method_exists($this->connection, 'selectOne')) {
-            return null;
-        }
-
         try {
             $table = $blueprint->getTable();
-            $schema = $this->connection->getConfig('username');
+            $schema = $this->configuredUsername();
 
             // Parse schema and table if table contains schema prefix
             if (str_contains($table, '.')) {
@@ -1279,7 +1415,7 @@ class OracleGrammar extends Grammar
 
             $result = $this->connection->selectOne($sql);
 
-            if ($result && isset($result->nullable)) {
+            if (is_object($result) && isset($result->nullable)) {
                 return (bool) $result->nullable;
             }
 
@@ -1293,7 +1429,7 @@ class OracleGrammar extends Grammar
     /**
      * Compile the query to determine the indexes.
      *
-     * @param  string  $schema
+     * @param  string|null  $schema
      * @param  string  $table
      */
     public function compileIndexes($schema, $table): string
@@ -1321,7 +1457,7 @@ class OracleGrammar extends Grammar
             .'on c.owner = a.table_owner and c.table_name = a.table_name and c.index_name = a.index_name '
             .'and (c.index_owner = a.owner or (c.index_owner is null and a.same_name_count = 1)) '
             ."where a.index_type <> 'LOB' order by i.index_owner, i.index_name, i.column_position",
-            $this->quoteString($schema),
+            $this->quoteString($schema ?? ''),
             $this->quoteString($table)
         );
     }
@@ -1390,6 +1526,7 @@ class OracleGrammar extends Grammar
     /**
      * Get the SQL for an identity column modifier.
      *
+     * @param  ColumnDefinition  $column
      * @return string|list<string>|null
      */
     protected function modifyGeneratedAs(Blueprint $blueprint, Fluent $column)
@@ -1403,7 +1540,8 @@ class OracleGrammar extends Grammar
                 $options[] = $column->generatedAs;
             }
 
-            if ($value = $column->get('startingValue', $column->get('from'))) {
+            $value = $column->get('startingValue', $column->get('from'));
+            if ((is_int($value) || is_string($value)) && $value) {
                 $options[] = "start with {$value}";
             }
 
@@ -1415,5 +1553,12 @@ class OracleGrammar extends Grammar
         }
 
         return $sql;
+    }
+
+    private function configuredUsername(): string
+    {
+        $username = $this->connection->getConfig('username');
+
+        return is_string($username) ? $username : '';
     }
 }

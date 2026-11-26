@@ -15,6 +15,7 @@ class Oci8DatabasePresenceVerifier extends DatabasePresenceVerifier
      * @param  string  $value
      * @param  int|null  $excludeId
      * @param  string|null  $idColumn
+     * @param  array<string, mixed>  $extra
      */
     public function getCount($collection, $column, $value, $excludeId = null, $idColumn = null, array $extra = []): int
     {
@@ -36,6 +37,8 @@ class Oci8DatabasePresenceVerifier extends DatabasePresenceVerifier
      *
      * @param  string  $collection
      * @param  string  $column
+     * @param  array<mixed>  $values
+     * @param  array<string, mixed>  $extra
      */
     public function getMultiCount($collection, $column, array $values, array $extra = []): int
     {

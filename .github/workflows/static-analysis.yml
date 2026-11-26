@@ -37,4 +37,4 @@ jobs:
           command: composer update --prefer-stable --prefer-dist --no-interaction --no-progress
 
       - name: Run Static Analysis
-        run: vendor/bin/phpstan
+        run: composer stan

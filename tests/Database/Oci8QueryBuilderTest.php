@@ -1811,6 +1811,13 @@ class Oci8QueryBuilderTest extends TestCase
         }
     }
 
+    public function test_group_limit_normalizes_a_numeric_string_to_an_integer(): void
+    {
+        $query = $this->getBuilder()->select('id')->from('users')->groupLimit('5.9', 'users.id');
+
+        $this->assertStringContainsString('where "LARAVEL_ROW" <= 5 order by', $query->toSql());
+    }
+
     public function test_get_count_for_pagination_with_bindings()
     {
         $builder = $this->getBuilder();
@@ -3986,6 +3993,45 @@ class Oci8QueryBuilderTest extends TestCase
         $this->assertEquals([1], $builder->getBindings());
     }
 
+    public function test_merge_compilers_preserve_a_wrapped_table_expression(): void
+    {
+        $table = new class('"USERS"') extends Raw
+        {
+            public function __toString(): string
+            {
+                return 'users';
+            }
+        };
+
+        $query = $this->getBuilder()->from($table);
+        $values = [['id' => 42, 'name' => 'Taylor']];
+        $grammar = $query->getGrammar();
+
+        $target = 'merge into "USERS" using (select ? as "ID", ? as "NAME" from dual) "LARAVEL_SOURCE" on ("LARAVEL_SOURCE"."ID" = "USERS"."ID")';
+
+        $this->assertStringStartsWith($target, $grammar->compileUpsert($query, $values, ['id'], ['name']));
+        $this->assertStringStartsWith(
+            str_replace(' = "USERS"."ID")', ' = "USERS"."ID" and "LARAVEL_SOURCE"."NAME" = "USERS"."NAME")', $target),
+            $grammar->compileInsertOrIgnore($query, $values),
+        );
+    }
+
+    public function test_from_preserves_the_alias_of_a_stringable_table_expression(): void
+    {
+        $table = new class('"USERS"') extends Raw
+        {
+            public function __toString(): string
+            {
+                return 'users';
+            }
+        };
+
+        $query = $this->getBuilder()->from($table, 'u')->where('u.id', 7);
+
+        $this->assertSame('select * from "USERS" "U" where "U"."ID" = ?', $query->toSql());
+        $this->assertSame([7], $query->getBindings());
+    }
+
     public function test_from_sub()
     {
         $builder = $this->getBuilder();
@@ -3998,6 +4044,23 @@ class Oci8QueryBuilderTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
         $builder = $this->getBuilder();
         $builder->fromSub(['invalid'], 'sessions')->where('bar', '<', '10');
+    }
+
+    public function test_from_sub_preserves_the_raw_from_extension_point(): void
+    {
+        $base = $this->getBuilder();
+        $query = new class($base->getConnection(), $base->getGrammar(), $base->getProcessor()) extends Builder
+        {
+            public function fromRaw($expression, $bindings = [])
+            {
+                return parent::fromRaw($expression.' /* custom */', $bindings);
+            }
+        };
+
+        $query->fromSub($base->from('users')->where('id', 7), 'filtered');
+
+        $this->assertSame('select * from (select * from "USERS" where "ID" = ?) "FILTERED" /* custom */', $query->toSql());
+        $this->assertSame([7], $query->getBindings());
     }
 
     public function test_from_sub_with_prefix()

@@ -3,7 +3,9 @@
 namespace Yajra\Oci8\Schema;
 
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Database\Schema\ColumnDefinition;
 use Illuminate\Support\Fluent;
+use InvalidArgumentException;
 use Yajra\Oci8\Oci8Connection;
 
 class OracleAutoIncrementHelper
@@ -31,7 +33,11 @@ class OracleAutoIncrementHelper
         }
 
         $col = $column->name;
-        $start = $column->get('start', $column->get('startingValue', $column->get('from', 1)));
+        $start = filter_var($column->get('start', $column->get('startingValue', $column->get('from', 1))), FILTER_VALIDATE_INT);
+
+        if ($start === false) {
+            throw new InvalidArgumentException('Oracle sequence start must be an integer in the PHP range.');
+        }
 
         // create sequence for auto increment
         $sequenceName = $this->createObjectName($table, $col, 'seq');
@@ -45,6 +51,8 @@ class OracleAutoIncrementHelper
 
     /**
      * Get qualified autoincrement column.
+     *
+     * @return ColumnDefinition|null
      */
     public function getQualifiedAutoIncrementColumn(Blueprint $blueprint): ?Fluent
     {
@@ -117,12 +125,8 @@ class OracleAutoIncrementHelper
                 AND cols.position = 1
             ORDER BY cols.table_name, cols.position";
 
-        $data = $this->connection->selectOne($sql);
+        $column = $this->connection->scalar($sql);
 
-        if ($data) {
-            return $data->column_name;
-        }
-
-        return '';
+        return is_string($column) ? $column : '';
     }
 }

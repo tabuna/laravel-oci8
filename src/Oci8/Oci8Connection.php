@@ -9,6 +9,7 @@ use Illuminate\Filesystem\Filesystem;
 use Illuminate\Support\Str;
 use PDO;
 use PDOStatement;
+use RuntimeException;
 use Throwable;
 use Yajra\Oci8\Query\Grammars\OracleGrammar as QueryGrammar;
 use Yajra\Oci8\Query\OracleBuilder as QueryBuilder;
@@ -18,8 +19,14 @@ use Yajra\Oci8\Schema\OracleBuilder as SchemaBuilder;
 use Yajra\Oci8\Schema\OracleSchemaState;
 use Yajra\Oci8\Schema\Sequence;
 use Yajra\Oci8\Schema\Trigger;
+use Yajra\Pdo\Oci8;
 use Yajra\Pdo\Oci8\Statement;
 
+/**
+ * @phpstan-import-type OracleConfig from \Yajra\Oci8\Connectors\OracleConnector
+ *
+ * @phpstan-type ProcedureBindings array<array-key, scalar|resource|object|null|array{value: mixed, type?: int, length?: int, options?: mixed}>
+ */
 class Oci8Connection extends Connection
 {
     const RECONNECT_ERRORS = 'reconnect_errors';
@@ -38,6 +45,7 @@ class Oci8Connection extends Connection
      * @param  PDO|\Closure  $pdo
      * @param  string  $database
      * @param  string  $tablePrefix
+     * @param  OracleConfig  $config
      */
     public function __construct($pdo, $database = '', $tablePrefix = '', array $config = [])
     {
@@ -52,15 +60,17 @@ class Oci8Connection extends Connection
 
     /**
      * Execute an insert statement and return its generated primary key.
+     *
+     * @param  array<array-key, mixed>  $bindings
      */
     public function insertGetId(string $query, array $bindings = []): int
     {
-        return $this->run($query, $bindings, function ($query, $bindings) {
+        $id = $this->run($query, $bindings, function (string $query, array $bindings) {
             if ($this->pretending()) {
                 return 0;
             }
 
-            $statement = $this->getPdo()->prepare($query);
+            $statement = $this->prepareOracleStatement($query);
 
             $this->bindValues($statement, $this->prepareBindings($bindings));
 
@@ -73,6 +83,10 @@ class Oci8Connection extends Connection
 
             return $id;
         });
+
+        $id = filter_var($id, FILTER_VALIDATE_INT);
+
+        return $id === false ? throw new RuntimeException('Oracle did not return an integer insert ID.') : $id;
     }
 
     /**
@@ -98,6 +112,8 @@ class Oci8Connection extends Connection
 
     /**
      * Update oracle session variables.
+     *
+     * @param  array<string, scalar|null>  $sessionVars
      */
     public function setSessionVars(array $sessionVars): static
     {
@@ -151,11 +167,17 @@ class Oci8Connection extends Connection
      */
     public function getServerVersion(): string
     {
-        $versionQuery = $this->getPdo()->prepare('SELECT BANNER FROM v$version');
+        $versionQuery = $this->prepareOracleStatement('SELECT BANNER FROM v$version');
         $versionQuery->execute();
         $version = $versionQuery->fetch(PDO::FETCH_OBJ);
 
-        return $version->banner;
+        $banner = $version === false ? null : ($version->banner ?? null);
+
+        if (! is_string($banner)) {
+            throw new RuntimeException('Oracle did not return a version banner.');
+        }
+
+        return $banner;
     }
 
     /**
@@ -163,7 +185,9 @@ class Oci8Connection extends Connection
      */
     public function serverVersion(): string
     {
-        return $this->getConfig('server_version') ?? '11g';
+        $version = $this->getConfig('server_version');
+
+        return is_scalar($version) ? (string) $version : '11g';
     }
 
     public function isVersionAbove(string $version): bool
@@ -235,13 +259,17 @@ class Oci8Connection extends Connection
     {
         $sessionVars = $this->getConfig('sessionVars') ?? [];
 
-        return $sessionVars['NLS_DATE_FORMAT'] ?? 'YYYY-MM-DD HH24:MI:SS';
+        $format = is_array($sessionVars) ? ($sessionVars['NLS_DATE_FORMAT'] ?? null) : null;
+
+        return is_scalar($format) ? (string) $format : 'YYYY-MM-DD HH24:MI:SS';
     }
 
     /**
      * Execute a PL/SQL Function and return its value.
      * Usage: DB::executeFunction('function_name', ['binding_1' => 'hi', 'binding_n' =>
      * 'bye'], PDO::PARAM_LOB).
+     *
+     * @param  ProcedureBindings  $bindings
      */
     public function executeFunction(
         string $functionName,
@@ -253,7 +281,7 @@ class Oci8Connection extends Connection
 
         $stmt = $this->addBindingsToStatement($stmt, $bindings);
 
-        $stmt->bindParam(':result', $result, $returnType, $length);
+        $stmt->bindParam(':result', $result, $returnType, $length ?? -1);
         $stmt->execute();
 
         return $result;
@@ -267,6 +295,8 @@ class Oci8Connection extends Connection
      *         $bindings = [
      *                  'p_userid'  => $id
      *         ];
+     *
+     * @param  ProcedureBindings  $bindings
      */
     public function executeProcedure(string $procedureName, array $bindings = []): bool
     {
@@ -282,12 +312,22 @@ class Oci8Connection extends Connection
      * Usage: DB::executeProcedureWithCursor($procedureName, $bindings).
      *
      * https://docs.oracle.com/cd/E17781_01/appdev.112/e18555/ch_six_ref_cur.htm#TDPPH218
+     *
+     * @param  string  $procedureName
+     * @param  ProcedureBindings  $bindings
+     * @return array<mixed>
      */
     public function executeProcedureWithCursor(
         $procedureName,
         array $bindings = [],
         string $cursorName = ':cursor'
     ): array {
+        $pdo = $this->getPdo();
+
+        if (! $pdo instanceof Oci8) {
+            throw new RuntimeException('Oracle procedure cursors require the OCI8 PDO driver.');
+        }
+
         $stmt = $this->createStatementFromProcedure($procedureName, $bindings, $cursorName);
 
         $stmt = $this->addBindingsToStatement($stmt, $bindings);
@@ -296,7 +336,11 @@ class Oci8Connection extends Connection
         $stmt->bindParam($cursorName, $cursor, PDO::PARAM_STMT);
         $stmt->execute();
 
-        $statement = new Statement($cursor, $this->getPdo(), $this->getPdo()->getOptions());
+        if (! is_resource($cursor)) {
+            throw new RuntimeException('Oracle did not return a procedure cursor.');
+        }
+
+        $statement = new Statement($cursor, $pdo, $pdo->getOptions());
         $statement->execute();
         $results = $statement->fetchAll(PDO::FETCH_OBJ);
         $statement->closeCursor();
@@ -306,6 +350,8 @@ class Oci8Connection extends Connection
 
     /**
      * Creates sql command to run a procedure with bindings.
+     *
+     * @param  ProcedureBindings  $bindings
      */
     public function createSqlFromProcedure(string $procedureName, array $bindings, bool|string $cursor = false): string
     {
@@ -319,6 +365,9 @@ class Oci8Connection extends Connection
 
     /**
      * Creates statement from procedure.
+     *
+     * @param  string  $procedureName
+     * @param  ProcedureBindings  $bindings
      */
     public function createStatementFromProcedure(
         $procedureName,
@@ -327,11 +376,13 @@ class Oci8Connection extends Connection
     ): PDOStatement {
         $sql = $this->createSqlFromProcedure($procedureName, $bindings, $cursorName);
 
-        return $this->getPdo()->prepare($sql);
+        return $this->prepareOracleStatement($sql);
     }
 
     /**
      * Create statement from function.
+     *
+     * @param  ProcedureBindings  $bindings
      */
     public function createStatementFromFunction(string $functionName, array $bindings): PDOStatement
     {
@@ -339,7 +390,18 @@ class Oci8Connection extends Connection
 
         $sql = sprintf('begin :result := %s(%s); end;', $functionName, $bindings);
 
-        return $this->getPdo()->prepare($sql);
+        return $this->prepareOracleStatement($sql);
+    }
+
+    private function prepareOracleStatement(string $sql): PDOStatement
+    {
+        $statement = $this->getPdo()->prepare($sql);
+
+        if ($statement === false) {
+            throw new RuntimeException('Could not prepare the Oracle statement.');
+        }
+
+        return $statement;
     }
 
     /**
@@ -422,6 +484,8 @@ class Oci8Connection extends Connection
 
     /**
      * Add bindings to statement.
+     *
+     * @param  ProcedureBindings  $bindings
      */
     public function addBindingsToStatement(PDOStatement $stmt, array $bindings): PDOStatement
     {
@@ -432,10 +496,10 @@ class Oci8Connection extends Connection
             $options = null;
 
             if (is_array($binding)) {
+                $type = $binding['type'] ?? PDO::PARAM_STR;
+                $length = $binding['length'] ?? -1;
+                $options = $binding['options'] ?? null;
                 $value = &$binding['value'];
-                $type = array_key_exists('type', $binding) ? $binding['type'] : PDO::PARAM_STR;
-                $length = array_key_exists('length', $binding) ? $binding['length'] : -1;
-                $options = array_key_exists('options', $binding) ? $binding['options'] : $options;
             }
 
             $stmt->bindParam(':'.$key, $value, $type, $length, $options);
@@ -466,16 +530,12 @@ class Oci8Connection extends Connection
             'ORA-56600',    // Illegal Call
         ];
 
-        $additionalErrors = null;
-
         $options = $this->config['options'] ?? [];
-        if (array_key_exists(static::RECONNECT_ERRORS, $options)) {
-            $additionalErrors = $this->config['options'][static::RECONNECT_ERRORS];
-        }
+        $key = static::RECONNECT_ERRORS;
+        $additionalErrors = is_array($options) && (is_string($key) || is_int($key)) ? ($options[$key] ?? null) : null;
 
         if (is_array($additionalErrors)) {
-            $lostConnectionErrors = array_merge($lostConnectionErrors,
-                $this->config['options'][static::RECONNECT_ERRORS]);
+            $lostConnectionErrors = array_merge($lostConnectionErrors, array_filter($additionalErrors, is_string(...)));
         }
 
         return Str::contains($e->getMessage(), $lostConnectionErrors);
@@ -500,8 +560,8 @@ class Oci8Connection extends Connection
     /**
      * Bind values to their parameters in the given statement.
      *
-     * @param  Statement  $statement
-     * @param  array  $bindings
+     * @param  PDOStatement  $statement
+     * @param  array<array-key, mixed>  $bindings
      */
     public function bindValues($statement, $bindings): void
     {

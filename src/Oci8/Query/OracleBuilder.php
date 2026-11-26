@@ -2,16 +2,26 @@
 
 namespace Yajra\Oci8\Query;
 
+use Closure;
+use Illuminate\Contracts\Database\Query\Expression;
 use Illuminate\Contracts\Support\Arrayable;
+use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
+use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Database\Query\Builder;
-use Illuminate\Database\Query\Expression;
+use Stringable;
 use Yajra\Oci8\Query\Grammars\OracleGrammar;
 use Yajra\Oci8\Query\Processors\OracleProcessor;
 
+/**
+ * @phpstan-type Subquery Closure|Builder|EloquentBuilder<*>|Relation<*, *, *>
+ */
 class OracleBuilder extends Builder
 {
     /**
      * Insert a new record and get the value of the primary key.
+     *
+     * @param  array<string, mixed>  $values
+     * @param  array<string, mixed>  $binaries
      */
     public function insertLob(array $values, array $binaries, string $sequence = 'id'): int
     {
@@ -30,6 +40,9 @@ class OracleBuilder extends Builder
 
     /**
      * Update a new record with blob field.
+     *
+     * @param  array<string, mixed>  $values
+     * @param  array<string, mixed>  $binaries
      */
     public function updateLob(array $values, array $binaries, string $sequence = 'id'): bool
     {
@@ -45,7 +58,7 @@ class OracleBuilder extends Builder
         /** @var OracleProcessor $processor */
         $processor = $this->processor;
 
-        return $processor->saveLob($this, $sql, $values, $binaries);
+        return (bool) $processor->saveLob($this, $sql, $values, $binaries);
     }
 
     /**
@@ -69,7 +82,7 @@ class OracleBuilder extends Builder
         if (is_array($values) && count($values) > 1000) {
             $chunks = array_chunk($values, 1000);
 
-            return $this->where(function ($query) use ($column, $chunks, $type, $not) {
+            return $this->where(function (Builder $query) use ($column, $chunks, $type, $not) {
                 foreach ($chunks as $ch) {
                     $sqlClause = $not ? 'where'.$type : 'orWhere'.$type;
                     $query->{$sqlClause}($column, $ch);
@@ -83,40 +96,41 @@ class OracleBuilder extends Builder
     /**
      * Set the table which the query is targeting.
      *
-     * @param  \Closure|Builder|string  $table
+     * @param  Subquery|Expression|string  $table
      * @param  string|null  $as
      * @return $this
      */
     public function from($table, $as = null): static
     {
-        if ($this->isQueryable($table)) {
-            return $this->fromSub($table, $as);
+        if ($table instanceof Closure || $table instanceof Builder || $table instanceof EloquentBuilder || $table instanceof Relation) {
+            return $this->fromSub($table, $as ?? '');
         }
 
-        $this->from = $as ? "{$table} {$as}" : $table;
-
-        return $this;
+        return parent::from($as && (is_string($table) || $table instanceof Stringable) ? "{$table} {$as}" : $table);
     }
 
     /**
      * Makes "from" fetch from a subquery.
      *
-     * @param  \Closure|Builder|string  $query
+     * @param  Subquery|string  $query
      * @param  string  $as
      */
     public function fromSub($query, $as): static
     {
-        [$query, $bindings] = $this->createSub($query);
+        [$query, $bindings] = $this->compileSubquery($query);
 
-        return $this->fromRaw('('.$query.') '.$this->grammar->wrapTable($as), $bindings);
+        $expression = '('.$query.') '.$this->grammar->wrapTable($as);
+
+        // @phpstan-ignore argument.type (The query is compiled and the alias is wrapped by the grammar.)
+        return $this->fromRaw($expression, $bindings);
     }
 
     /**
      * Add a subquery join clause to the query.
      *
-     * @param  \Closure|Builder|string  $query
+     * @param  Subquery|string  $query
      * @param  string  $as
-     * @param  \Closure|string  $first
+     * @param  Closure|string  $first
      * @param  string|null  $operator
      * @param  string|null  $second
      * @param  string  $type
@@ -124,30 +138,30 @@ class OracleBuilder extends Builder
      */
     public function joinSub($query, $as, $first, $operator = null, $second = null, $type = 'inner', $where = false): static
     {
-        [$query, $bindings] = $this->createSub($query);
+        [$query, $bindings] = $this->compileSubquery($query);
 
         $expression = '('.$query.') '.$this->grammar->wrapTable($as);
 
         $this->addBinding($bindings, 'join');
 
-        return $this->join(new Expression($expression), $first, $operator, $second, $type, $where);
+        return $this->join(new CompiledExpression($expression), $first, $operator, $second, $type, $where);
     }
 
     /**
      * Add a subquery cross join to the query.
      *
-     * @param  \Closure|Builder|string  $query
+     * @param  Subquery|string  $query
      * @param  string  $as
      */
     public function crossJoinSub($query, $as): static
     {
-        [$query, $bindings] = $this->createSub($query);
+        [$query, $bindings] = $this->compileSubquery($query);
 
         $expression = '('.$query.') '.$this->grammar->wrapTable($as);
 
         $this->addBinding($bindings, 'join');
 
-        $this->joins[] = $this->newJoinClause($this, 'cross', new Expression($expression));
+        $this->joins[] = $this->newJoinClause($this, 'cross', new CompiledExpression($expression));
 
         return $this;
     }
@@ -155,47 +169,52 @@ class OracleBuilder extends Builder
     /**
      * Add a lateral join clause to the query.
      *
-     * @param  \Closure|Builder|string  $query
+     * @param  Subquery|string  $query
      */
     public function joinLateral($query, string $as, string $type = 'inner'): static
     {
-        [$query, $bindings] = $this->createSub($query);
+        [$query, $bindings] = $this->compileSubquery($query);
 
         $expression = '('.$query.') '.$this->grammar->wrapTable($as);
 
         $this->addBinding($bindings, 'join');
 
-        $this->joins[] = $this->newJoinLateralClause($this, $type, new Expression($expression));
+        $this->joins[] = $this->newJoinLateralClause($this, $type, new CompiledExpression($expression));
 
         return $this;
     }
 
     /**
+     * @param  Subquery|string  $query
+     * @return array{string, list<mixed>}
+     */
+    private function compileSubquery($query): array
+    {
+        /** @var array{string, list<mixed>} $subquery */
+        $subquery = $query instanceof Relation ? $this->parseSub($query) : $this->createSub($query);
+
+        return $subquery;
+    }
+
+    /**
      * Get the count of the total records for the paginator.
      *
-     * @param  array  $columns
+     * @param  array<string|Expression>  $columns
      * @return int
      */
     public function getCountForPagination($columns = ['*'])
     {
         $results = $this->runPaginationCountQuery($columns);
+        $row = array_change_key_case((array) ($results[0] ?? []));
+        $count = $row['aggregate'] ?? null;
 
-        // Once we have run the pagination count query, we will get the resulting count and
-        // take into account what type of query it was. When there is a group by we will
-        // just return the count of the entire results set since that will be correct.
-        if (! isset($results[0])) {
-            return 0;
-        } elseif (is_object($results[0])) {
-            return (int) (property_exists($results[0], 'AGGREGATE') ? $results[0]->AGGREGATE : $results[0]->aggregate);   // to solve the Oracle issue: auto-convert field to uppercase
-        }
-
-        return (int) array_change_key_case((array) $results[0])['aggregate'];
+        return is_numeric($count) ? (int) $count : 0;
     }
 
     /**
      * Run a pagination count query.
      *
-     * @param  array<string|\Illuminate\Contracts\Database\Query\Expression>  $columns
+     * @param  array<string|Expression>  $columns
      * @return array<mixed>
      */
     protected function runPaginationCountQuery($columns = ['*'])
@@ -204,11 +223,12 @@ class OracleBuilder extends Builder
             $clone = $this->cloneForPaginationCount();
 
             if (is_null($clone->columns) && ! empty($this->joins)) {
-                $clone->select($this->from.'.*');
+                $table = $this->from instanceof Stringable ? (string) $this->from : $this->grammar->getValue($this->from);
+                $clone->select($table.'.*');
             }
 
             return $this->newQuery()
-                ->from(new Expression('('.$clone->toSql().') '.$this->grammar->wrap('aggregate_table')))
+                ->from(new CompiledExpression('('.$clone->toSql().') '.$this->grammar->wrap('aggregate_table')))
                 ->mergeBindings($clone)
                 ->setAggregate('count', $this->withoutSelectAliases($columns))
                 ->get()->all();

@@ -2,6 +2,7 @@
 
 namespace Yajra\Oci8\Schema;
 
+use Illuminate\Contracts\Database\Query\Expression;
 use Illuminate\Database\Schema\Blueprint;
 use Yajra\Oci8\Oci8Connection;
 
@@ -10,8 +11,10 @@ use Yajra\Oci8\Oci8Connection;
  */
 class OraclePreferences
 {
+    /** @var list<array<string|Expression>> */
     protected array $columns = [];
 
+    /** @var list<string> */
     protected array $preferenceName = [];
 
     public function __construct(protected Oci8Connection $connection) {}
@@ -61,15 +64,24 @@ class OraclePreferences
         $this->preferenceName = [];
 
         foreach ($blueprint->getCommands() as $value) {
-            if ($value['name'] === 'fulltext' && count($value['columns']) > 1) {
-                $this->columns[] = $value['columns'];
-                $this->preferenceName[] = $value['index'].'_preference';
+            if ($value['name'] !== 'fulltext') {
+                continue;
+            }
+
+            /** @var array{columns: array<string|Expression>, index: string} $index */
+            $index = $value->getAttributes();
+
+            if (count($index['columns']) > 1) {
+                $this->columns[] = $index['columns'];
+                $this->preferenceName[] = $index['index'].'_preference';
             }
         }
     }
 
     /**
      * Format with "implode" function columns to use in preferences.
+     *
+     * @param  array<string|Expression>  $columns
      */
     protected function formatMultipleCtxColumns(array $columns): string
     {

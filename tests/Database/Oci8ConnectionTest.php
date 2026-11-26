@@ -119,6 +119,14 @@ class Oci8ConnectionTest extends TestCase
         $this->assertTrue($pdo->statement->executed);
     }
 
+    public function test_numeric_server_version_is_used_for_feature_checks(): void
+    {
+        $connection = new Oci8Connection(new Oci8ConnectionTestMockPDO, config: ['server_version' => 19]);
+
+        $this->assertSame('19', $connection->serverVersion());
+        $this->assertTrue($connection->isVersionAboveOrEqual('12c'));
+    }
+
     public function test_get_date_format_returns_configured_session_format()
     {
         $connection = new Oci8Connection(new Oci8ConnectionTestMockPDO, config: [

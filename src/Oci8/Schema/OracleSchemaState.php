@@ -4,7 +4,11 @@ namespace Yajra\Oci8\Schema;
 
 use Illuminate\Database\Connection;
 use Illuminate\Database\Schema\SchemaState;
+use Yajra\Oci8\Connectors\OracleConnector;
 
+/**
+ * @phpstan-import-type OracleConfig from OracleConnector
+ */
 class OracleSchemaState extends SchemaState
 {
     /**
@@ -19,7 +23,7 @@ class OracleSchemaState extends SchemaState
             ->mustRun(
                 $this->output,
                 array_merge(
-                    $this->baseVariables($this->connection->getConfig()),
+                    $this->baseVariables($this->connectionConfig()),
                     [
                         'LARAVEL_LOAD_PATH' => $path,
                     ]
@@ -40,19 +44,20 @@ class OracleSchemaState extends SchemaState
     /**
      * Get the base variables for a dump / load command.
      *
-     * @return array
+     * @param  OracleConfig  $config
+     * @return array<string, string>
      */
     protected function baseVariables(array $config)
     {
         $config['host'] ??= '';
 
         return [
-            'LARAVEL_LOAD_HOST' => is_array($config['host']) ? $config['host'][0] : $config['host'],
-            'LARAVEL_LOAD_PORT' => $config['port'] ?? '',
-            'LARAVEL_LOAD_USER' => $config['username'],
-            'ORACLE_PASSWORD' => $config['password'],
-            'ORACLE_SERVICE_NAME' => $config['service_name'],
-            'LARAVEL_LOAD_DATABASE' => $config['database'],
+            'LARAVEL_LOAD_HOST' => is_array($config['host']) ? ($config['host'][0] ?? '') : $config['host'],
+            'LARAVEL_LOAD_PORT' => (string) ($config['port'] ?? ''),
+            'LARAVEL_LOAD_USER' => $config['username'] ?? '',
+            'ORACLE_PASSWORD' => $config['password'] ?? '',
+            'ORACLE_SERVICE_NAME' => $config['service_name'] ?? '',
+            'LARAVEL_LOAD_DATABASE' => $config['database'] ?? '',
         ];
     }
 
@@ -70,7 +75,7 @@ class OracleSchemaState extends SchemaState
             ->mustRun(
                 null,
                 array_merge(
-                    $this->baseVariables($this->connection->getConfig()),
+                    $this->baseVariables($this->connectionConfig()),
                     [
                         'LARAVEL_LOAD_PATH' => $path,
                     ]
@@ -78,12 +83,21 @@ class OracleSchemaState extends SchemaState
             );
     }
 
+    /** @return OracleConfig */
+    private function connectionConfig(): array
+    {
+        /** @var OracleConfig $config */
+        $config = $this->connection->getConfig();
+
+        return $config;
+    }
+
     /**
      * Get the name of the application's migration table.
      */
     protected function getMigrationTable(): string
     {
-        [$schema, $table] = $this->connection->getSchemaBuilder()->parseSchemaAndTable($this->migrationTable, withDefaultSchema: true);
+        [$schema, $table] = $this->connection->getSchemaBuilder()->parseSchemaAndTable($this->migrationTable ?? 'migrations', withDefaultSchema: true);
 
         return $schema.'.'.$this->connection->getTablePrefix().$table;
     }

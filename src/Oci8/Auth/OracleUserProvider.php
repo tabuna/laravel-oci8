@@ -5,11 +5,14 @@ namespace Yajra\Oci8\Auth;
 use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Support\Str;
+use Yajra\Oci8\Query\CompiledExpression;
 
 class OracleUserProvider extends EloquentUserProvider
 {
     /**
      * Retrieve a user by the given credentials.
+     *
+     * @param  array<string, mixed>  $credentials
      */
     public function retrieveByCredentials(#[\SensitiveParameter] array $credentials): ?Authenticatable
     {
@@ -24,7 +27,8 @@ class OracleUserProvider extends EloquentUserProvider
 
         foreach ($credentials as $key => $value) {
             if (! Str::contains($key, 'password')) {
-                $query->whereRaw("upper({$key}) = upper(?)", [$value]);
+                $column = $query->getQuery()->getGrammar()->wrap($key);
+                $query->whereRaw(new CompiledExpression("upper({$column}) = upper(?)"), [$value]);
             }
         }
 
